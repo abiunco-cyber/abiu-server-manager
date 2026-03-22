@@ -14,5 +14,6 @@
     "ffmpeg-static": "^5.2.0",
     "libsodium-wrappers": "^0.8.2",
     "play-dl": "^1.9.7"
+    "shoukaku": "^4.1.1"
   }
 }
