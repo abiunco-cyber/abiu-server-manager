@@ -81,9 +81,17 @@ const shoukaku = new Shoukaku(new Connectors.DiscordJS(client), nodes, {
   restTimeout: 10000
 });
 
-shoukaku.on('ready', (name) => console.log(`✅ Lavalink node ready: ${name}`));
-shoukaku.on('error', (name, error) => console.error(`❌ Lavalink node error (${name}):`, error));
-shoukaku.on('close', (name, code, reason) => console.log(`⚠️ Lavalink node closed (${name}): ${code} ${reason}`));
+shoukaku.on('ready', (name) => {
+  console.log(`✅ Lavalink node ready: ${name}`);
+});
+
+shoukaku.on('error', (name, error) => {
+  console.error(`❌ Lavalink node error (${name}):`, error);
+});
+
+shoukaku.on('close', (name, code, reason) => {
+  console.log(`⚠️ Lavalink node closed (${name}): ${code} ${reason}`);
+});
 
 // ==================================================
 // CRASH PROTECTION
@@ -116,7 +124,7 @@ function getGuildMusicState(guildId) {
       volume: 50,
       paused: false,
       autoplay: false,
-      loopMode: 'off', // off | song | queue
+      loopMode: 'off',
       controllerMessageId: null,
       controllerChannelId: MUSIC_CONTROLLER_CHANNEL_ID,
       startedAtMs: null,
@@ -179,6 +187,7 @@ function getElapsedMs(state) {
   const now = Date.now();
   const pausedExtra = state.pausedAtMs ? now - state.pausedAtMs : 0;
   const elapsedMs = now - state.startedAtMs - state.accumulatedPausedMs - pausedExtra;
+
   return Math.max(0, elapsedMs);
 }
 
@@ -190,6 +199,7 @@ function clearPlaybackTimers(state) {
 
 function startPanelInterval(state) {
   stopPanelInterval(state);
+
   state.panelInterval = setInterval(() => {
     updateMusicPanel(state).catch(() => null);
   }, PANEL_UPDATE_INTERVAL_MS);
@@ -448,7 +458,10 @@ async function connectToMemberVoice(member, state) {
 
 async function searchTrack(query) {
   const node = shoukaku.nodes.values().next().value;
-  if (!node) throw new Error('No Lavalink node is available.');
+
+  if (!node) {
+    throw new Error("Can't find any nodes to connect on.");
+  }
 
   const result = await node.rest.resolve(query);
   return result;
@@ -494,9 +507,13 @@ async function resolveTrack(query, requestedByUser) {
 
 async function resolveAutoplayTrack(currentTrack) {
   const result = await searchTrack(`ytsearch:${currentTrack.info.author || ''} ${currentTrack.info.title}`);
-  if (!result || result.loadType !== 'search' || !result.data.length) return null;
+
+  if (!result || result.loadType !== 'search' || !result.data.length) {
+    return null;
+  }
 
   const next = result.data.find(track => track.info.identifier !== currentTrack.info.identifier) || null;
+
   if (!next) return null;
 
   next.requestedById = 'autoplay';
@@ -505,7 +522,9 @@ async function resolveAutoplayTrack(currentTrack) {
 }
 
 async function playTrack(state, track) {
-  if (!state.player) throw new Error('Player is not connected.');
+  if (!state.player) {
+    throw new Error('Player is not connected.');
+  }
 
   state.current = track;
   state.paused = false;
@@ -543,6 +562,7 @@ async function playNextTrack(state, options = {}) {
   if (state.queue.length === 0) {
     if (state.autoplay && state.current) {
       const related = await resolveAutoplayTrack(state.current).catch(() => null);
+
       if (related) {
         await playTrack(state, related);
         return;
@@ -590,6 +610,15 @@ async function stopMusic(state) {
   }
 
   await updateMusicPanel(state);
+}
+
+function resetBrokenState(state) {
+  state.queue = [];
+  state.history = [];
+  state.current = null;
+  state.paused = false;
+  clearPlaybackTimers(state);
+  stopPanelInterval(state);
 }
 
 async function safeInteractionError(interaction, message) {
@@ -679,7 +708,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
           const track = await resolveTrack(query, interaction.user);
 
-          if (!state.current) {
+          const playerLooksUsable =
+            state.player &&
+            state.current &&
+            state.currentVoiceChannelId &&
+            !state.paused;
+
+          if (!playerLooksUsable) {
+            resetBrokenState(state);
             await playTrack(state, track);
 
             await interaction.editReply({
