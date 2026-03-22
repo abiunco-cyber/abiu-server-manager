@@ -1,7 +1,5 @@
 require('dotenv').config();
 
-const fs = require('fs');
-
 const {
   Client,
   GatewayIntentBits,
@@ -18,52 +16,25 @@ const {
   MessageFlags
 } = require('discord.js');
 
-const {
-  joinVoiceChannel,
-  createAudioPlayer,
-  createAudioResource,
-  AudioPlayerStatus,
-  VoiceConnectionStatus,
-  entersState,
-  NoSubscriberBehavior,
-  getVoiceConnection,
-  generateDependencyReport
-} = require('@discordjs/voice');
-
-const play = require('play-dl');
+const { Connectors, Shoukaku } = require('shoukaku');
 
 // ==================================================
 // CONFIG
 // ==================================================
 const TOKEN = process.env.TOKEN;
-const CLIENT_ID = '1484710177486929991';
-const GUILD_ID = '1461027191583146034';
+const CLIENT_ID = process.env.CLIENT_ID;
+const GUILD_ID = process.env.GUILD_ID;
+
+const LAVALINK_HOST = process.env.LAVALINK_HOST || '127.0.0.1';
+const LAVALINK_PORT = Number(process.env.LAVALINK_PORT || 2333);
+const LAVALINK_PASSWORD = process.env.LAVALINK_PASSWORD || 'youshallnotpass';
+
 const MUSIC_CONTROLLER_CHANNEL_ID = '1462549822438641674';
 
 const MUSIC_PANEL_TITLE = 'Music Controller';
 const DEFAULT_PANEL_TEXT = 'Waiting for music...\nUse /play to play a song or add it to the queue.';
 const PANEL_COLOR = 0x5865F2;
 const PANEL_UPDATE_INTERVAL_MS = 5000;
-
-// ==================================================
-// YOUTUBE COOKIE FILE
-// ==================================================
-let youtubeCookie = null;
-
-try {
-  youtubeCookie = fs.readFileSync('./youtube_cookie.txt', 'utf8').trim();
-  console.log('✅ YouTube cookie file loaded');
-} catch {
-  console.log('⚠️ No YouTube cookie file found');
-}
-
-if (youtubeCookie) {
-  play.setToken({
-    youtube: {
-      cookie: youtubeCookie
-    }
-  });
-}
 
 // ==================================================
 // BUTTON IDS
@@ -92,6 +63,29 @@ const client = new Client({
 });
 
 // ==================================================
+// LAVALINK
+// ==================================================
+const nodes = [
+  {
+    name: 'local',
+    url: `${LAVALINK_HOST}:${LAVALINK_PORT}`,
+    auth: LAVALINK_PASSWORD
+  }
+];
+
+const shoukaku = new Shoukaku(new Connectors.DiscordJS(client), nodes, {
+  moveOnDisconnect: false,
+  resume: false,
+  resumeTimeout: 30,
+  reconnectTries: 5,
+  restTimeout: 10000
+});
+
+shoukaku.on('ready', (name) => console.log(`✅ Lavalink node ready: ${name}`));
+shoukaku.on('error', (name, error) => console.error(`❌ Lavalink node error (${name}):`, error));
+shoukaku.on('close', (name, code, reason) => console.log(`⚠️ Lavalink node closed (${name}): ${code} ${reason}`));
+
+// ==================================================
 // CRASH PROTECTION
 // ==================================================
 client.on('error', (error) => {
@@ -113,23 +107,16 @@ const musicStates = new Map();
 
 function getGuildMusicState(guildId) {
   if (!musicStates.has(guildId)) {
-    const player = createAudioPlayer({
-      behaviors: {
-        noSubscriber: NoSubscriberBehavior.Pause
-      }
-    });
-
-    const state = {
+    musicStates.set(guildId, {
       guildId,
-      player,
-      connection: null,
+      player: null,
       queue: [],
       history: [],
       current: null,
-      volume: 0.5,
+      volume: 50,
       paused: false,
       autoplay: false,
-      loopMode: 'off',
+      loopMode: 'off', // off | song | queue
       controllerMessageId: null,
       controllerChannelId: MUSIC_CONTROLLER_CHANNEL_ID,
       startedAtMs: null,
@@ -137,55 +124,7 @@ function getGuildMusicState(guildId) {
       accumulatedPausedMs: 0,
       panelInterval: null,
       currentVoiceChannelId: null
-    };
-
-    player.on(AudioPlayerStatus.Playing, async () => {
-      if (!state.startedAtMs) {
-        state.startedAtMs = Date.now();
-        state.accumulatedPausedMs = 0;
-        state.pausedAtMs = null;
-      }
-
-      state.paused = false;
-      await updateMusicPanel(state).catch(() => null);
     });
-
-    player.on(AudioPlayerStatus.Paused, async () => {
-      state.paused = true;
-
-      if (!state.pausedAtMs) {
-        state.pausedAtMs = Date.now();
-      }
-
-      await updateMusicPanel(state).catch(() => null);
-    });
-
-    player.on(AudioPlayerStatus.Idle, async () => {
-      try {
-        await handleTrackEnd(state);
-      } catch (error) {
-        console.error(`❌ Track end error for guild ${guildId}:`, error);
-      }
-    });
-
-    player.on('error', async (error) => {
-      console.error(`❌ Audio player error for guild ${guildId}:`, error);
-
-      try {
-        if (state.queue.length > 0) {
-          await playNextTrack(state);
-        } else {
-          clearPlaybackTimers(state);
-          state.current = null;
-          state.paused = false;
-          await updateMusicPanel(state);
-        }
-      } catch (secondaryError) {
-        console.error(`❌ Failed to recover from audio error in guild ${guildId}:`, secondaryError);
-      }
-    });
-
-    musicStates.set(guildId, state);
   }
 
   return musicStates.get(guildId);
@@ -194,12 +133,13 @@ function getGuildMusicState(guildId) {
 // ==================================================
 // HELPERS
 // ==================================================
-function formatDuration(seconds) {
-  if (!seconds || Number.isNaN(seconds)) return 'Unknown';
+function formatDuration(ms) {
+  if (!ms || Number.isNaN(ms)) return 'Unknown';
 
-  const hrs = Math.floor(seconds / 3600);
-  const mins = Math.floor((seconds % 3600) / 60);
-  const secs = Math.floor(seconds % 60);
+  const totalSeconds = Math.floor(ms / 1000);
+  const hrs = Math.floor(totalSeconds / 3600);
+  const mins = Math.floor((totalSeconds % 3600) / 60);
+  const secs = totalSeconds % 60;
 
   if (hrs > 0) {
     return `${hrs}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
@@ -219,12 +159,10 @@ function shuffleArray(array) {
   return copy;
 }
 
-function createProgressBar(currentSeconds, totalSeconds, size = 14) {
-  if (!totalSeconds || totalSeconds <= 0) {
-    return '▬'.repeat(size);
-  }
+function createProgressBar(currentMs, totalMs, size = 14) {
+  if (!totalMs || totalMs <= 0) return '▬'.repeat(size);
 
-  const ratio = Math.max(0, Math.min(1, currentSeconds / totalSeconds));
+  const ratio = Math.max(0, Math.min(1, currentMs / totalMs));
   const position = Math.min(size - 1, Math.floor(ratio * size));
 
   let bar = '';
@@ -235,14 +173,13 @@ function createProgressBar(currentSeconds, totalSeconds, size = 14) {
   return bar;
 }
 
-function getElapsedSeconds(state) {
+function getElapsedMs(state) {
   if (!state.current || !state.startedAtMs) return 0;
 
   const now = Date.now();
   const pausedExtra = state.pausedAtMs ? now - state.pausedAtMs : 0;
   const elapsedMs = now - state.startedAtMs - state.accumulatedPausedMs - pausedExtra;
-
-  return Math.max(0, Math.floor(elapsedMs / 1000));
+  return Math.max(0, elapsedMs);
 }
 
 function clearPlaybackTimers(state) {
@@ -253,7 +190,6 @@ function clearPlaybackTimers(state) {
 
 function startPanelInterval(state) {
   stopPanelInterval(state);
-
   state.panelInterval = setInterval(() => {
     updateMusicPanel(state).catch(() => null);
   }, PANEL_UPDATE_INTERVAL_MS);
@@ -340,7 +276,7 @@ function buildQueuePreview(state) {
 
   return state.queue
     .slice(0, 5)
-    .map((track, index) => `${index + 1}. ${track.title}`)
+    .map((track, index) => `${index + 1}. ${track.info.title}`)
     .join('\n');
 }
 
@@ -353,27 +289,27 @@ function buildMusicPanelEmbed(state) {
     embed.setDescription(DEFAULT_PANEL_TEXT);
     embed.addFields(
       { name: 'Queue', value: `${state.queue.length} song(s)`, inline: true },
-      { name: 'Volume', value: `${Math.round(state.volume * 100)}%`, inline: true },
+      { name: 'Volume', value: `${state.volume}%`, inline: true },
       { name: 'Autoplay', value: state.autoplay ? 'Enabled' : 'Disabled', inline: true },
       { name: 'Loop', value: getLoopLabel(state.loopMode), inline: true }
     );
     return embed;
   }
 
-  const elapsedSeconds = getElapsedSeconds(state);
-  const totalSeconds = state.current.durationInSec || 0;
-  const progressBar = createProgressBar(elapsedSeconds, totalSeconds);
+  const elapsedMs = getElapsedMs(state);
+  const totalMs = state.current.info.length || 0;
+  const progressBar = createProgressBar(elapsedMs, totalMs);
 
   embed
-    .setDescription(`Now playing:\n[${state.current.title}](${state.current.url})`)
+    .setDescription(`Now playing:\n[${state.current.info.title}](${state.current.info.uri || state.current.info.url || 'https://youtube.com'})`)
     .addFields(
       {
         name: 'Progress',
-        value: `${progressBar}\n${formatDuration(elapsedSeconds)} / ${formatDuration(totalSeconds)}`,
+        value: `${progressBar}\n${formatDuration(elapsedMs)} / ${formatDuration(totalMs)}`,
         inline: false
       },
       { name: 'Requested By', value: state.current.requestedByMention || 'Unknown', inline: true },
-      { name: 'Volume', value: `${Math.round(state.volume * 100)}%`, inline: true },
+      { name: 'Volume', value: `${state.volume}%`, inline: true },
       { name: 'State', value: state.paused ? 'Paused' : 'Playing', inline: true },
       { name: 'Queue', value: `${state.queue.length} song(s)`, inline: true },
       { name: 'Loop', value: getLoopLabel(state.loopMode), inline: true },
@@ -381,8 +317,8 @@ function buildMusicPanelEmbed(state) {
       { name: 'Up Next', value: buildQueuePreview(state), inline: false }
     );
 
-  if (state.current.thumbnail) {
-    embed.setImage(state.current.thumbnail);
+  if (state.current.info.artworkUrl) {
+    embed.setImage(state.current.info.artworkUrl);
   }
 
   return embed;
@@ -474,142 +410,102 @@ async function connectToMemberVoice(member, state) {
     throw new Error('That voice channel is full.');
   }
 
-  console.log('Joining VC:', {
-    guild: member.guild.id,
-    channel: voiceChannel.id,
-    channelName: voiceChannel.name,
-    type: voiceChannel.type,
-    userLimit: voiceChannel.userLimit,
-    memberCount: voiceChannel.members.size
-  });
+  let player = state.player;
 
-  const existing = getVoiceConnection(member.guild.id);
-  if (existing) {
-    try {
-      existing.destroy();
-    } catch {}
-    state.connection = null;
+  if (!player) {
+    player = await shoukaku.joinVoiceChannel({
+      guildId: member.guild.id,
+      channelId: voiceChannel.id,
+      shardId: 0,
+      deaf: true
+    });
+
+    state.player = player;
+    state.currentVoiceChannelId = voiceChannel.id;
+
+    player.on('end', async () => {
+      await handleTrackEnd(state).catch(console.error);
+    });
+
+    player.on('closed', (data) => {
+      console.log('⚠️ Player closed:', data);
+    });
+
+    player.on('exception', (data) => {
+      console.error('❌ Lavalink exception:', data);
+    });
+
+    player.on('stuck', (data) => {
+      console.error('❌ Lavalink stuck:', data);
+    });
+  } else if (state.currentVoiceChannelId !== voiceChannel.id) {
+    await player.moveChannel(voiceChannel.id);
+    state.currentVoiceChannelId = voiceChannel.id;
   }
 
-  const connection = joinVoiceChannel({
-    channelId: voiceChannel.id,
-    guildId: member.guild.id,
-    adapterCreator: member.guild.voiceAdapterCreator,
-    selfDeaf: true,
-    selfMute: false
-  });
+  return player;
+}
 
-  state.connection = connection;
-  state.currentVoiceChannelId = voiceChannel.id;
+async function searchTrack(query) {
+  const node = shoukaku.nodes.values().next().value;
+  if (!node) throw new Error('No Lavalink node is available.');
 
-  connection.on('stateChange', (oldState, newState) => {
-    console.log(`🔊 Voice state changed: ${oldState.status} -> ${newState.status}`);
-  });
-
-  connection.on('error', (error) => {
-    console.error(`❌ Voice connection error in guild ${member.guild.id}:`, error);
-  });
-
-  try {
-    await entersState(connection, VoiceConnectionStatus.Ready, 30000);
-  } catch (error) {
-    console.error('❌ Voice connection did not become ready:', error);
-
-    try {
-      connection.destroy();
-    } catch {}
-
-    state.connection = null;
-    state.currentVoiceChannelId = null;
-
-    throw new Error('I could not fully connect to the voice channel.');
-  }
-
-  connection.subscribe(state.player);
-  return connection;
+  const result = await node.rest.resolve(query);
+  return result;
 }
 
 async function resolveTrack(query, requestedByUser) {
-  const requestedByMention = `<@${requestedByUser.id}>`;
+  let searchQuery = query;
 
-  if (play.sp_validate(query) === 'track') {
-    const spotifyTrack = await play.spotify(query);
-    const artist = spotifyTrack.artists?.[0]?.name || '';
-    const searchTerm = `${artist} - ${spotifyTrack.name}`.trim();
-
-    const youtubeResults = await play.search(searchTerm, {
-      limit: 1,
-      source: { youtube: 'video' }
-    });
-
-    const yt = youtubeResults[0];
-    if (!yt) {
-      throw new Error('Could not find a playable match for that Spotify track.');
-    }
-
-    return {
-      title: yt.title || spotifyTrack.name,
-      url: yt.url,
-      durationInSec: yt.durationInSec || spotifyTrack.durationInSec || 0,
-      thumbnail: yt.thumbnails?.[0]?.url || spotifyTrack.thumbnail?.url || null,
-      requestedById: requestedByUser.id,
-      requestedByMention,
-      source: 'youtube'
-    };
+  if (
+    !query.startsWith('http://') &&
+    !query.startsWith('https://') &&
+    !query.startsWith('ytsearch:') &&
+    !query.startsWith('spsearch:')
+  ) {
+    searchQuery = `ytsearch:${query}`;
   }
 
-  if (play.yt_validate(query) === 'video') {
-    const info = await play.video_basic_info(query);
-    const details = info.video_details;
+  const result = await searchTrack(searchQuery);
 
-    return {
-      title: details.title,
-      url: details.url,
-      durationInSec: Number(details.durationInSec || 0),
-      thumbnail: details.thumbnails?.[0]?.url || null,
-      requestedById: requestedByUser.id,
-      requestedByMention,
-      source: 'youtube'
-    };
-  }
-
-  const results = await play.search(query, {
-    limit: 1,
-    source: { youtube: 'video' }
-  });
-
-  const first = results[0];
-  if (!first) {
+  if (!result || !result.data) {
     throw new Error('No results found for that song.');
   }
 
-  return {
-    title: first.title,
-    url: first.url,
-    durationInSec: first.durationInSec || 0,
-    thumbnail: first.thumbnails?.[0]?.url || null,
-    requestedById: requestedByUser.id,
-    requestedByMention,
-    source: 'youtube'
-  };
+  let selectedTrack = null;
+
+  if (result.loadType === 'track') {
+    selectedTrack = result.data;
+  } else if (result.loadType === 'search' && result.data.length > 0) {
+    selectedTrack = result.data[0];
+  } else if (result.loadType === 'playlist' && result.data.tracks.length > 0) {
+    selectedTrack = result.data.tracks[0];
+  }
+
+  if (!selectedTrack) {
+    throw new Error('No playable result was found.');
+  }
+
+  selectedTrack.requestedById = requestedByUser.id;
+  selectedTrack.requestedByMention = `<@${requestedByUser.id}>`;
+
+  return selectedTrack;
 }
 
-async function createResourceForTrack(track, volume) {
-  const stream = await play.stream(track.url, {
-    discordPlayerCompatibility: true
-  });
+async function resolveAutoplayTrack(currentTrack) {
+  const result = await searchTrack(`ytsearch:${currentTrack.info.author || ''} ${currentTrack.info.title}`);
+  if (!result || result.loadType !== 'search' || !result.data.length) return null;
 
-  const resource = createAudioResource(stream.stream, {
-    inputType: stream.type,
-    inlineVolume: true
-  });
+  const next = result.data.find(track => track.info.identifier !== currentTrack.info.identifier) || null;
+  if (!next) return null;
 
-  resource.volume.setVolume(volume);
-  return resource;
+  next.requestedById = 'autoplay';
+  next.requestedByMention = 'Autoplay';
+  return next;
 }
 
 async function playTrack(state, track) {
-  const resource = await createResourceForTrack(track, state.volume);
+  if (!state.player) throw new Error('Player is not connected.');
 
   state.current = track;
   state.paused = false;
@@ -617,31 +513,15 @@ async function playTrack(state, track) {
   state.startedAtMs = Date.now();
   startPanelInterval(state);
 
-  state.player.play(resource);
-  await updateMusicPanel(state);
-}
+  await state.player.playTrack({
+    track: track.encoded
+  });
 
-async function getAutoplayTrack(currentTrack) {
-  try {
-    const info = await play.video_basic_info(currentTrack.url);
-    const related = info.related_videos?.find(
-      (video) => video.url && video.url !== currentTrack.url && !video.live
-    );
-
-    if (!related) return null;
-
-    return {
-      title: related.title,
-      url: related.url,
-      durationInSec: related.durationInSec || 0,
-      thumbnail: related.thumbnails?.[0]?.url || null,
-      requestedById: 'autoplay',
-      requestedByMention: 'Autoplay',
-      source: 'youtube'
-    };
-  } catch {
-    return null;
+  if (state.volume !== 100) {
+    await state.player.setGlobalVolume(state.volume);
   }
+
+  await updateMusicPanel(state);
 }
 
 async function playNextTrack(state, options = {}) {
@@ -661,8 +541,8 @@ async function playNextTrack(state, options = {}) {
   }
 
   if (state.queue.length === 0) {
-    if (state.autoplay && state.current?.url) {
-      const related = await getAutoplayTrack(state.current);
+    if (state.autoplay && state.current) {
+      const related = await resolveAutoplayTrack(state.current).catch(() => null);
       if (related) {
         await playTrack(state, related);
         return;
@@ -696,15 +576,16 @@ async function stopMusic(state) {
   stopPanelInterval(state);
   clearPlaybackTimers(state);
 
-  try {
-    state.player.stop(true);
-  } catch {}
-
-  if (state.connection) {
+  if (state.player) {
     try {
-      state.connection.destroy();
+      await state.player.stopTrack();
     } catch {}
-    state.connection = null;
+
+    try {
+      await state.player.connection.disconnect();
+    } catch {}
+
+    state.player = null;
     state.currentVoiceChannelId = null;
   }
 
@@ -735,8 +616,6 @@ async function safeInteractionError(interaction, message) {
 // ==================================================
 client.once(Events.ClientReady, async () => {
   console.log(`✅ ${client.user.tag} is now online!`);
-  console.log('✅ Voice system loaded');
-  console.log(generateDependencyReport());
 
   const commands = [
     new SlashCommandBuilder()
@@ -800,16 +679,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
           const track = await resolveTrack(query, interaction.user);
 
-          const isPlayingSomething =
-            state.current ||
-            state.player.state.status === AudioPlayerStatus.Playing ||
-            state.player.state.status === AudioPlayerStatus.Buffering ||
-            state.paused;
-
-          if (!isPlayingSomething) {
+          if (!state.current) {
             await playTrack(state, track);
+
             await interaction.editReply({
-              content: `✅ Now playing: **${track.title}**`
+              content: `✅ Now playing: **${track.info.title}**`
             }).catch(() => null);
             return;
           }
@@ -818,7 +692,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           await updateMusicPanel(state);
 
           await interaction.editReply({
-            content: `✅ Added to queue: **${track.title}**`
+            content: `✅ Added to queue: **${track.info.title}**`
           }).catch(() => null);
           return;
         } catch (error) {
@@ -843,7 +717,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const lines = [];
 
         if (state.current) {
-          lines.push(`**Now Playing:** ${state.current.title}`);
+          lines.push(`**Now Playing:** ${state.current.info.title}`);
         } else {
           lines.push('**Now Playing:** Nothing');
         }
@@ -851,7 +725,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         if (state.queue.length > 0) {
           const queueLines = state.queue
             .slice(0, 10)
-            .map((track, index) => `${index + 1}. ${track.title}`);
+            .map((track, index) => `${index + 1}. ${track.info.title}`);
           lines.push('', '**Queue:**', ...queueLines);
         } else {
           lines.push('', '**Queue:** Empty');
@@ -893,7 +767,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return;
       }
 
-      if (!state.connection) {
+      if (!state.player) {
         await interaction.followUp({
           content: '❌ I am not connected to a voice channel yet.',
           flags: MessageFlags.Ephemeral
@@ -916,10 +790,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
             state.pausedAtMs = null;
           }
 
-          state.player.unpause();
+          await state.player.setPaused(false);
           state.paused = false;
         } else {
-          state.player.pause();
+          await state.player.setPaused(true);
           state.paused = true;
           state.pausedAtMs = Date.now();
         }
@@ -937,7 +811,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           return;
         }
 
-        await playNextTrack(state, { skipped: true });
+        await state.player.stopTrack();
         return;
       }
 
@@ -960,25 +834,15 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
 
       if (interaction.customId === MUSIC_BUTTONS.VOLUME_DOWN) {
-        state.volume = Math.max(0.1, Number((state.volume - 0.1).toFixed(2)));
-
-        const resource = state.player.state.resource;
-        if (resource?.volume) {
-          resource.volume.setVolume(state.volume);
-        }
-
+        state.volume = Math.max(10, state.volume - 10);
+        await state.player.setGlobalVolume(state.volume);
         await updateMusicPanel(state);
         return;
       }
 
       if (interaction.customId === MUSIC_BUTTONS.VOLUME_UP) {
-        state.volume = Math.min(2, Number((state.volume + 0.1).toFixed(2)));
-
-        const resource = state.player.state.resource;
-        if (resource?.volume) {
-          resource.volume.setVolume(state.volume);
-        }
-
+        state.volume = Math.min(200, state.volume + 10);
+        await state.player.setGlobalVolume(state.volume);
         await updateMusicPanel(state);
         return;
       }
