@@ -1,5 +1,7 @@
 require('dotenv').config();
 
+const fs = require('fs');
+
 const {
   Client,
   GatewayIntentBits,
@@ -42,6 +44,26 @@ const MUSIC_PANEL_TITLE = 'Music Controller';
 const DEFAULT_PANEL_TEXT = 'Waiting for music...\nUse /play to play a song or add it to the queue.';
 const PANEL_COLOR = 0x5865F2;
 const PANEL_UPDATE_INTERVAL_MS = 5000;
+
+// ==================================================
+// YOUTUBE COOKIE FILE
+// ==================================================
+let youtubeCookie = null;
+
+try {
+  youtubeCookie = fs.readFileSync('./youtube_cookie.txt', 'utf8').trim();
+  console.log('✅ YouTube cookie file loaded');
+} catch {
+  console.log('⚠️ No YouTube cookie file found');
+}
+
+if (youtubeCookie) {
+  play.setToken({
+    youtube: {
+      cookie: youtubeCookie
+    }
+  });
+}
 
 // ==================================================
 // BUTTON IDS
@@ -107,7 +129,7 @@ function getGuildMusicState(guildId) {
       volume: 0.5,
       paused: false,
       autoplay: false,
-      loopMode: 'off', // off | song | queue
+      loopMode: 'off',
       controllerMessageId: null,
       controllerChannelId: MUSIC_CONTROLLER_CHANNEL_ID,
       startedAtMs: null,
@@ -123,15 +145,18 @@ function getGuildMusicState(guildId) {
         state.accumulatedPausedMs = 0;
         state.pausedAtMs = null;
       }
+
       state.paused = false;
       await updateMusicPanel(state).catch(() => null);
     });
 
     player.on(AudioPlayerStatus.Paused, async () => {
       state.paused = true;
+
       if (!state.pausedAtMs) {
         state.pausedAtMs = Date.now();
       }
+
       await updateMusicPanel(state).catch(() => null);
     });
 
@@ -497,7 +522,7 @@ async function connectToMemberVoice(member, state) {
     state.connection = null;
     state.currentVoiceChannelId = null;
 
-    throw new Error('I could not fully connect to the voice channel. Check channel permissions, user limit, and hosting/network support.');
+    throw new Error('I could not fully connect to the voice channel.');
   }
 
   connection.subscribe(state.player);
@@ -890,6 +915,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
             state.accumulatedPausedMs += Date.now() - state.pausedAtMs;
             state.pausedAtMs = null;
           }
+
           state.player.unpause();
           state.paused = false;
         } else {
