@@ -1,3 +1,5 @@
+require('dotenv').config();
+
 const {
   Client,
   GatewayIntentBits,
@@ -31,7 +33,7 @@ const play = require('play-dl');
 // ==================================================
 // CONFIG
 // ==================================================
-const TOKEN = 'MTQ4NDcxMDE3NzQ4NjkyOTk5MQ.Gab_92.EtkV4fQi54VcA5W1lnw-U4wq8nxNkr_tsnEbmc';
+const TOKEN = process.env.TOKEN;
 const CLIENT_ID = '1484710177486929991';
 const GUILD_ID = '1461027191583146034';
 const MUSIC_CONTROLLER_CHANNEL_ID = '1462549822438641674';
