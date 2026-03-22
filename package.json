@@ -1,16 +1,8 @@
 {
   "name": "abiu-server-manager",
   "version": "1.0.0",
-  "description": "Discord music bot with controller panel, queue UI, autoplay, and loop system",
   "main": "index.js",
-  "scripts": {
-    "start": "node index.js"
-  },
   "dependencies": {
-    "@discordjs/opus": "^0.10.0",
-    "@discordjs/voice": "^0.18.0",
-    "ffmpeg-static": "^5.2.0",
-    "libsodium-wrappers": "^0.8.2",
     "discord.js": "^14.25.1",
     "dotenv": "^16.4.5",
     "shoukaku": "^4.1.1"
