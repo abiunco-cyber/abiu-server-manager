@@ -18,10 +18,15 @@ const {
   ButtonStyle,
   MessageFlags
 } = require('discord.js');
+const { Connectors, Shoukaku } = require('shoukaku');
 
 const TOKEN = process.env.TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID;
+
+const LAVALINK_HOST = process.env.LAVALINK_HOST || '127.0.0.1';
+const LAVALINK_PORT = Number(process.env.LAVALINK_PORT || 2333);
+const LAVALINK_PASSWORD = process.env.LAVALINK_PASSWORD || 'youshallnotpass';
 
 if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
   console.error('❌ Missing TOKEN, CLIENT_ID or GUILD_ID in .env');
@@ -207,11 +212,230 @@ const client = new Client({
     GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.GuildMessageReactions,
+    GatewayIntentBits.GuildVoiceStates,
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.DirectMessages
   ],
   partials: [Partials.Channel, Partials.Message, Partials.Reaction]
 });
+
+// ======================================================
+// LAVALINK
+// ======================================================
+const nodes = [
+  {
+    name: 'local',
+    url: `${LAVALINK_HOST}:${LAVALINK_PORT}`,
+    auth: LAVALINK_PASSWORD
+  }
+];
+
+const shoukaku = new Shoukaku(new Connectors.DiscordJS(client), nodes, {
+  moveOnDisconnect: false,
+  resume: false,
+  reconnectTries: 5,
+  restTimeout: 10000
+});
+
+shoukaku.on('ready', (name) => {
+  console.log(`✅ Lavalink node ready: ${name}`);
+});
+
+shoukaku.on('error', (name, error) => {
+  console.error(`❌ Lavalink node error (${name}):`, error);
+});
+
+shoukaku.on('close', (name, code, reason) => {
+  console.log(`⚠️ Lavalink node closed (${name}): ${code} ${reason}`);
+});
+
+// ======================================================
+// MUSIC STATE
+// ======================================================
+const musicStates = new Map();
+
+function getMusicState(guildId) {
+  if (!musicStates.has(guildId)) {
+    musicStates.set(guildId, {
+      player: null,
+      current: null,
+      queue: [],
+      volume: 100,
+      paused: false,
+      textChannelId: null
+    });
+  }
+
+  return musicStates.get(guildId);
+}
+
+function resetMusicState(state) {
+  state.current = null;
+  state.queue = [];
+  state.paused = false;
+  state.textChannelId = null;
+}
+
+async function getLavalinkNode() {
+  const node = shoukaku.nodes.values().next().value;
+  if (!node) throw new Error("Can't find any nodes to connect on.");
+  return node;
+}
+
+async function resolveLavalinkTrack(query) {
+  const node = await getLavalinkNode();
+
+  let search = query;
+  if (!/^https?:\/\//i.test(query)) {
+    search = `ytsearch:${query}`;
+  }
+
+  const result = await node.rest.resolve(search);
+
+  if (!result || !result.data) {
+    throw new Error('No results found for that song.');
+  }
+
+  if (result.loadType === 'track') {
+    return [result.data];
+  }
+
+  if (result.loadType === 'search') {
+    return result.data;
+  }
+
+  if (result.loadType === 'playlist') {
+    return result.data.tracks;
+  }
+
+  return [];
+}
+
+function formatDuration(ms) {
+  if (!ms || ms <= 0) return 'Unknown';
+
+  const totalSeconds = Math.floor(ms / 1000);
+  const hrs = Math.floor(totalSeconds / 3600);
+  const mins = Math.floor((totalSeconds % 3600) / 60);
+  const secs = totalSeconds % 60;
+
+  if (hrs > 0) {
+    return `${hrs}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+  }
+
+  return `${mins}:${String(secs).padStart(2, '0')}`;
+}
+
+async function ensurePlayer(interactionOrMember, state) {
+  const guild = interactionOrMember.guild;
+  const member = interactionOrMember.member || interactionOrMember;
+
+  const voiceChannel = member.voice?.channel;
+  if (!voiceChannel) {
+    throw new Error('You need to be in a voice channel first.');
+  }
+
+  if (voiceChannel.type !== ChannelType.GuildVoice) {
+    throw new Error('Please join a normal voice channel.');
+  }
+
+  const me = guild.members.me;
+  const perms = voiceChannel.permissionsFor(me);
+
+  if (!perms?.has(PermissionsBitField.Flags.Connect)) {
+    throw new Error('I do not have permission to join your voice channel.');
+  }
+
+  if (!perms?.has(PermissionsBitField.Flags.Speak)) {
+    throw new Error('I do not have permission to speak in your voice channel.');
+  }
+
+  if (!state.player) {
+    state.player = await shoukaku.joinVoiceChannel({
+      guildId: guild.id,
+      channelId: voiceChannel.id,
+      shardId: 0,
+      deaf: true
+    });
+
+    state.player.on('end', async () => {
+      await playNext(guild.id).catch(console.error);
+    });
+
+    state.player.on('closed', (data) => {
+      console.log('⚠️ Music player closed:', data);
+    });
+
+    state.player.on('exception', (data) => {
+      console.error('❌ Music player exception:', data);
+    });
+
+    state.player.on('stuck', (data) => {
+      console.error('❌ Music player stuck:', data);
+    });
+  } else {
+    await state.player.moveChannel(voiceChannel.id).catch(() => null);
+  }
+
+  return state.player;
+}
+
+async function playTrack(guildId, track) {
+  const state = getMusicState(guildId);
+  if (!state.player) throw new Error('Music player is not connected.');
+
+  state.current = track;
+  state.paused = false;
+
+  await state.player.playTrack({ track: track.encoded });
+  await state.player.setGlobalVolume(state.volume).catch(() => null);
+
+  if (state.textChannelId) {
+    const channel = await client.channels.fetch(state.textChannelId).catch(() => null);
+    if (channel && channel.type === ChannelType.GuildText) {
+      const embed = new EmbedBuilder()
+        .setColor(0x2ecc71)
+        .setTitle('Now Playing')
+        .setDescription(`[${track.info.title}](${track.info.uri || track.info.url || 'https://youtube.com'})`)
+        .addFields(
+          { name: 'Author', value: track.info.author || 'Unknown', inline: true },
+          { name: 'Duration', value: formatDuration(track.info.length), inline: true },
+          { name: 'Requested By', value: track.requestedByMention || 'Unknown', inline: true }
+        );
+
+      if (track.info.artworkUrl) {
+        embed.setThumbnail(track.info.artworkUrl);
+      }
+
+      await channel.send({ embeds: [embed] }).catch(() => null);
+    }
+  }
+}
+
+async function playNext(guildId) {
+  const state = getMusicState(guildId);
+
+  if (!state.queue.length) {
+    state.current = null;
+    state.paused = false;
+    return;
+  }
+
+  const next = state.queue.shift();
+  await playTrack(guildId, next);
+}
+
+async function stopAndDisconnect(guildId) {
+  const state = getMusicState(guildId);
+
+  if (state.player) {
+    await state.player.stopTrack().catch(() => null);
+    await state.player.connection.disconnect().catch(() => null);
+    state.player = null;
+  }
+
+  resetMusicState(state);
+}
 
 // ======================================================
 // HELPERS
@@ -513,7 +737,38 @@ client.once('ready', async () => {
       .setDescription('Rename this ticket')
       .addStringOption((opt) =>
         opt.setName('name').setDescription('New ticket name').setRequired(true)
-      )
+      ),
+
+    new SlashCommandBuilder()
+      .setName('play')
+      .setDescription('Play a song or add it to the queue')
+      .addStringOption((opt) =>
+        opt.setName('query').setDescription('Song name, YouTube link, or Spotify link').setRequired(true)
+      ),
+
+    new SlashCommandBuilder()
+      .setName('skip')
+      .setDescription('Skip the current song'),
+
+    new SlashCommandBuilder()
+      .setName('pause')
+      .setDescription('Pause the current song'),
+
+    new SlashCommandBuilder()
+      .setName('resume')
+      .setDescription('Resume the current song'),
+
+    new SlashCommandBuilder()
+      .setName('stop')
+      .setDescription('Stop music and clear the queue'),
+
+    new SlashCommandBuilder()
+      .setName('queue')
+      .setDescription('Show the music queue'),
+
+    new SlashCommandBuilder()
+      .setName('leave')
+      .setDescription('Disconnect the bot from voice')
   ].map((cmd) => cmd.toJSON());
 
   const rest = new REST({ version: '10' }).setToken(TOKEN);
@@ -742,6 +997,147 @@ client.on('interactionCreate', async (interaction) => {
         const newName = sanitizeChannelName(interaction.options.getString('name', true));
         await interaction.channel.setName(newName).catch(() => null);
         await interaction.reply(`✅ Ticket renamed to \`${newName}\`.`);
+        return;
+      }
+
+      // ==========================
+      // MUSIC COMMANDS
+      // ==========================
+      if (interaction.commandName === 'play') {
+        const query = interaction.options.getString('query', true);
+        const state = getMusicState(interaction.guild.id);
+
+        await interaction.deferReply();
+
+        try {
+          await ensurePlayer(interaction, state);
+          state.textChannelId = interaction.channel.id;
+
+          const tracks = await resolveLavalinkTrack(query);
+          if (!tracks.length) {
+            await interaction.editReply('❌ No playable result was found.');
+            return;
+          }
+
+          if (/spotify\.com\/playlist/i.test(query) || /spotify\.com\/album/i.test(query)) {
+            for (const track of tracks) {
+              track.requestedByMention = `<@${interaction.user.id}>`;
+              state.queue.push(track);
+            }
+
+            if (!state.current) {
+              await playNext(interaction.guild.id);
+              await interaction.editReply(`✅ Added ${tracks.length} tracks and started playback.`);
+            } else {
+              await interaction.editReply(`✅ Added ${tracks.length} tracks to the queue.`);
+            }
+            return;
+          }
+
+          const track = tracks[0];
+          track.requestedByMention = `<@${interaction.user.id}>`;
+
+          if (!state.current) {
+            await playTrack(interaction.guild.id, track);
+            await interaction.editReply(`✅ Now playing: **${track.info.title}**`);
+          } else {
+            state.queue.push(track);
+            await interaction.editReply(`✅ Added to queue: **${track.info.title}**`);
+          }
+
+          return;
+        } catch (error) {
+          console.error('Play command error:', error);
+          await interaction.editReply(`❌ ${error.message || 'Failed to play that track.'}`);
+          return;
+        }
+      }
+
+      if (interaction.commandName === 'skip') {
+        const state = getMusicState(interaction.guild.id);
+
+        if (!state.player || !state.current) {
+          await interaction.reply(makeEphemeral('❌ Nothing is currently playing.'));
+          return;
+        }
+
+        await state.player.stopTrack().catch(() => null);
+        await interaction.reply(makeEphemeral('✅ Skipped the current song.'));
+        return;
+      }
+
+      if (interaction.commandName === 'pause') {
+        const state = getMusicState(interaction.guild.id);
+
+        if (!state.player || !state.current) {
+          await interaction.reply(makeEphemeral('❌ Nothing is currently playing.'));
+          return;
+        }
+
+        await state.player.setPaused(true).catch(() => null);
+        state.paused = true;
+        await interaction.reply(makeEphemeral('⏸️ Music paused.'));
+        return;
+      }
+
+      if (interaction.commandName === 'resume') {
+        const state = getMusicState(interaction.guild.id);
+
+        if (!state.player || !state.current) {
+          await interaction.reply(makeEphemeral('❌ Nothing is currently playing.'));
+          return;
+        }
+
+        await state.player.setPaused(false).catch(() => null);
+        state.paused = false;
+        await interaction.reply(makeEphemeral('▶️ Music resumed.'));
+        return;
+      }
+
+      if (interaction.commandName === 'stop') {
+        await stopAndDisconnect(interaction.guild.id);
+        await interaction.reply(makeEphemeral('⏹️ Stopped music, cleared queue, and disconnected.'));
+        return;
+      }
+
+      if (interaction.commandName === 'queue') {
+        const state = getMusicState(interaction.guild.id);
+
+        if (!state.current && state.queue.length === 0) {
+          await interaction.reply(makeEphemeral('❌ The music queue is empty.'));
+          return;
+        }
+
+        const embed = new EmbedBuilder()
+          .setColor(0x5865f2)
+          .setTitle('Music Queue');
+
+        if (state.current) {
+          embed.addFields({
+            name: 'Now Playing',
+            value: `**${state.current.info.title}**\n${formatDuration(state.current.info.length)}`,
+            inline: false
+          });
+        }
+
+        if (state.queue.length) {
+          embed.addFields({
+            name: 'Up Next',
+            value: state.queue
+              .slice(0, 10)
+              .map((track, index) => `${index + 1}. ${track.info.title}`)
+              .join('\n'),
+            inline: false
+          });
+        }
+
+        await interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
+        return;
+      }
+
+      if (interaction.commandName === 'leave') {
+        await stopAndDisconnect(interaction.guild.id);
+        await interaction.reply(makeEphemeral('👋 Disconnected from the voice channel.'));
         return;
       }
     }
