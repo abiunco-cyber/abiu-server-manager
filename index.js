@@ -846,6 +846,12 @@ async function updateMinecraftStatusEmbed() {
 client.once('ready', async () => {
   console.log(`✅ ${client.user.tag} is online`);
 
+    await updateMinecraftStatusEmbed();
+
+  setInterval(async () => {
+    await updateMinecraftStatusEmbed();
+  }, CONFIG.minecraftStatus.updateIntervalMs);
+
   await sendCountingIntroIfNeeded();
 
   const commands = [
