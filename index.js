@@ -1,3 +1,4 @@
+const https = require('https');
 require('dotenv').config();
 
 const fs = require('fs');
@@ -45,6 +46,13 @@ const CONFIG = {
     rulesChannelId: '1461730433640435838'
   },
 
+  minecraftStatus: {
+    channelId: '1485776549058838629',
+    address: '202.36.95.112:25565',
+    updateIntervalMs: 120000,
+    title: 'Minecraft Server Status'
+  },
+  
   welcome: {
     publicChannelId: '1461830069491208233'
   },
@@ -689,6 +697,147 @@ function buildReactionPanelDescription(guild, panel) {
       return `Unknown = ${emojiText}`;
     })
     .join('\n');
+}
+
+function httpsGetJson(url, headers = {}) {
+  return new Promise((resolve, reject) => {
+    const req = https.get(
+      url,
+      {
+        headers: {
+          'User-Agent': 'AbiuServerManager/1.0 Discord Bot',
+          ...headers
+        }
+      },
+      (res) => {
+        let data = '';
+
+        res.on('data', (chunk) => {
+          data += chunk;
+        });
+
+        res.on('end', () => {
+          try {
+            const json = JSON.parse(data);
+            resolve(json);
+          } catch (error) {
+            reject(error);
+          }
+        });
+      }
+    );
+
+    req.on('error', reject);
+    req.setTimeout(10000, () => {
+      req.destroy(new Error('Minecraft status request timed out'));
+    });
+  });
+}
+
+async function fetchMinecraftServerStatus(address) {
+  try {
+    const apiUrl = `https://api.mcsrvstat.us/3/${encodeURIComponent(address)}`;
+    const data = await httpsGetJson(apiUrl);
+
+    return {
+      online: Boolean(data.online),
+      playersOnline: data?.players?.online ?? 0,
+      playersMax: data?.players?.max ?? 0,
+      version:
+        data?.protocol?.name ||
+        data?.version ||
+        'Unknown',
+      motd:
+        Array.isArray(data?.motd?.clean) && data.motd.clean.length
+          ? data.motd.clean.join('\n')
+          : 'No MOTD available',
+      hostname: data?.hostname || address,
+      ip: data?.ip || 'Unknown',
+      port: data?.port || 25565
+    };
+  } catch (error) {
+    console.error('❌ Failed to fetch Minecraft server status:', error);
+
+    return {
+      online: false,
+      playersOnline: 0,
+      playersMax: 0,
+      version: 'Unknown',
+      motd: 'Server offline or API unavailable',
+      hostname: address,
+      ip: 'Unknown',
+      port: 25565
+    };
+  }
+}
+
+function buildMinecraftStatusEmbed(status) {
+  return new EmbedBuilder()
+    .setColor(status.online ? 0x2ecc71 : 0xe74c3c)
+    .setTitle(CONFIG.minecraftStatus.title)
+    .addFields(
+      {
+        name: 'Status',
+        value: status.online ? '🟢 Online' : '🔴 Offline',
+        inline: true
+      },
+      {
+        name: 'Players',
+        value: `${status.playersOnline}/${status.playersMax}`,
+        inline: true
+      },
+      {
+        name: 'Version',
+        value: status.version,
+        inline: true
+      },
+      {
+        name: 'Server',
+        value: CONFIG.minecraftStatus.address,
+        inline: false
+      }
+    )
+    .setDescription(status.motd)
+    .setTimestamp();
+}
+
+async function getOrCreateMinecraftStatusMessage() {
+  const channel = await client.channels
+    .fetch(CONFIG.minecraftStatus.channelId)
+    .catch(() => null);
+
+  if (!channel || channel.type !== ChannelType.GuildText) {
+    console.error('❌ Minecraft status channel not found or is not a text channel.');
+    return null;
+  }
+
+  const recentMessages = await channel.messages.fetch({ limit: 20 }).catch(() => null);
+  const existing = recentMessages?.find(
+    (msg) =>
+      msg.author.id === client.user.id &&
+      msg.embeds?.[0]?.title === CONFIG.minecraftStatus.title
+  );
+
+  if (existing) {
+    return existing;
+  }
+
+  const initialStatus = await fetchMinecraftServerStatus(CONFIG.minecraftStatus.address);
+  const embed = buildMinecraftStatusEmbed(initialStatus);
+  const sent = await channel.send({ embeds: [embed] }).catch(() => null);
+  return sent || null;
+}
+
+async function updateMinecraftStatusEmbed() {
+  const message = await getOrCreateMinecraftStatusMessage();
+  if (!message) return;
+
+  const status = await fetchMinecraftServerStatus(CONFIG.minecraftStatus.address);
+  const embed = buildMinecraftStatusEmbed(status);
+
+  await message.edit({ embeds: [embed] }).catch((error) => {
+    console.error('❌ Failed to update Minecraft status embed:', error);
+  });
 }
 
 // ======================================================
