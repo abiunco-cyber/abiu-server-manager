@@ -843,6 +843,14 @@ client.on('guildMemberAdd', async (member) => {
 // INTERACTIONS
 // ======================================================
 client.on('interactionCreate', async (interaction) => {
+  const disabledMusic = ['play', 'skip', 'stop', 'queue', 'pause', 'resume'];
+
+if (interaction.isChatInputCommand() && disabledMusic.includes(interaction.commandName)) {
+  return interaction.reply({
+    content: '❌ Music systeem is tijdelijk uitgeschakeld.',
+    ephemeral: true
+  });
+}
   try {
     if (interaction.isChatInputCommand()) {
       if (!interaction.guild || !interaction.member) return;
