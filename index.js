@@ -93,8 +93,6 @@ const CONFIG = {
     panels: {
       ranks: {
         title: 'Get your ranks',
-        description:
-          'React to this message to assign yourself roles\n\n:bronze: = @Bronze\n:silver: = @Silver\n:gold: = @Gold\n:platinum: = @Platinum\n:diamond: = @Diamond\n:champion: = @Champion\n:gc: = @Grand Champion\n:ssl: = @SuperSonic Legend',
         color: 0xf08cff,
         items: [
           { roleName: 'Bronze', emojiName: 'bronze' },
@@ -110,8 +108,6 @@ const CONFIG = {
 
       platform: {
         title: 'What device do you play on?',
-        description:
-          'phone = :phone:\npc = :pc:\nxbox = :xbox:\nplaystation = :ps:',
         color: 0xf08cff,
         items: [
           { roleName: 'phone', emojiName: 'phone' },
@@ -123,8 +119,6 @@ const CONFIG = {
 
       gender: {
         title: 'What is your gender?',
-        description:
-          '👨 = Male\n👩 = Female',
         color: 0xf08cff,
         items: [
           { roleId: '1462555108020850874', emoji: '👨' },
@@ -134,8 +128,6 @@ const CONFIG = {
 
       color: {
         title: 'What is your favorite color?',
-        description:
-          '❤️ = Red\n🧡 = Orange\n💛 = Yellow\n💚 = Green\n💙 = Blue\n💜 = Purple\n🩷 = Pink',
         color: 0xf08cff,
         items: [
           { roleName: '💙・Blue', emoji: '💙' },
@@ -150,8 +142,6 @@ const CONFIG = {
 
       games: {
         title: 'What games do you play?',
-        description:
-          '🚗 = Rocket League\n🩸 = 7 Days To Die\n⚽ = FC 26\n🔪 = Dead by Daylight\n🔫 = Call Of Duty\n🧟 = Project Zomboid',
         color: 0xf08cff,
         items: [
           { roleName: '🚗・Rocket League', emoji: '🚗' },
@@ -201,9 +191,11 @@ function loadCountingState() {
     userStrikes: {}
   });
 }
+
 function saveCountingState(state) {
   writeJson(CONFIG.counting.stateFile, state);
 }
+
 let countingState = loadCountingState();
 
 // ======================================================
@@ -243,30 +235,41 @@ function sanitizeChannelName(input) {
 
 function getEmojiString(guild, panelItem) {
   if (panelItem.emoji) return panelItem.emoji;
+
   if (panelItem.emojiName) {
     const found = guild.emojis.cache.find((e) => e.name === panelItem.emojiName);
-    if (found) return `<:${found.name}:${found.id}>`;
+    if (found) {
+      return found.animated
+        ? `<a:${found.name}:${found.id}>`
+        : `<:${found.name}:${found.id}>`;
+    }
   }
+
   return '•';
 }
 
 function getEmojiIdentifier(guild, panelItem) {
   if (panelItem.emoji) return panelItem.emoji;
+
   if (panelItem.emojiName) {
     const found = guild.emojis.cache.find((e) => e.name === panelItem.emojiName);
     if (found) return `${found.name}:${found.id}`;
   }
+
   return null;
 }
 
 function findRoleByConfig(guild, item) {
   if (item.roleId) return guild.roles.cache.get(item.roleId) || null;
+
   if (item.roleName) {
     const exact = guild.roles.cache.find((r) => r.name === item.roleName);
     if (exact) return exact;
+
     const lowered = item.roleName.toLowerCase();
     return guild.roles.cache.find((r) => r.name.toLowerCase() === lowered) || null;
   }
+
   return null;
 }
 
@@ -386,13 +389,14 @@ async function sendCountingIntroIfNeeded() {
 
 function registerBadCounting(userId) {
   if (!countingState.userStrikes[userId]) countingState.userStrikes[userId] = [];
+
   const now = Date.now();
   countingState.userStrikes[userId].push(now);
   countingState.userStrikes[userId] = countingState.userStrikes[userId].filter(
     (ts) => now - ts <= CONFIG.counting.warningWindowMs
   );
-  saveCountingState(countingState);
 
+  saveCountingState(countingState);
   return countingState.userStrikes[userId].length;
 }
 
@@ -407,6 +411,29 @@ async function timeoutCountingUser(member) {
   setTimeout(async () => {
     await channel.permissionOverwrites.delete(member.id).catch(() => null);
   }, CONFIG.counting.timeoutMinutes * 60 * 1000);
+}
+
+function cleanRoleLabel(roleName) {
+  return roleName.replace(/^[^\s]+・/, '');
+}
+
+function buildReactionPanelDescription(guild, panel) {
+  return panel.items
+    .map((item) => {
+      const emojiText = getEmojiString(guild, item);
+
+      if (item.roleName) {
+        return `${cleanRoleLabel(item.roleName)} = ${emojiText}`;
+      }
+
+      if (item.roleId) {
+        const role = guild.roles.cache.get(item.roleId);
+        return `${role ? cleanRoleLabel(role.name) : 'Unknown Role'} = ${emojiText}`;
+      }
+
+      return `Unknown = ${emojiText}`;
+    })
+    .join('\n');
 }
 
 // ======================================================
@@ -534,13 +561,11 @@ client.on('interactionCreate', async (interaction) => {
     if (interaction.isChatInputCommand()) {
       if (!interaction.guild || !interaction.member) return;
 
-      // ping
       if (interaction.commandName === 'ping') {
         await interaction.reply('pong');
         return;
       }
 
-      // rmc
       if (interaction.commandName === 'rmc') {
         if (!interaction.member.permissions.has(PermissionsBitField.Flags.ManageMessages)) {
           await interaction.reply(makeEphemeral('❌ You do not have permission to use this command.'));
@@ -562,6 +587,7 @@ client.on('interactionCreate', async (interaction) => {
 
         if (sub === 'all') {
           let total = 0;
+
           while (true) {
             const fetched = await interaction.channel.messages.fetch({ limit: 100 }).catch(() => null);
             if (!fetched || fetched.size === 0) break;
@@ -582,7 +608,6 @@ client.on('interactionCreate', async (interaction) => {
         }
       }
 
-      // send verify panel
       if (interaction.commandName === 'sendverifypanel') {
         if (!isAdmin(interaction.member)) {
           await interaction.reply(makeEphemeral('❌ Admin only.'));
@@ -598,7 +623,6 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      // send ticket panel
       if (interaction.commandName === 'sendticketpanel') {
         if (!isAdmin(interaction.member)) {
           await interaction.reply(makeEphemeral('❌ Admin only.'));
@@ -614,7 +638,6 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      // send reaction panel
       if (interaction.commandName === 'sendreactionpanel') {
         if (!isAdmin(interaction.member)) {
           await interaction.reply(makeEphemeral('❌ Admin only.'));
@@ -623,6 +646,7 @@ client.on('interactionCreate', async (interaction) => {
 
         const panelKey = interaction.options.getString('panel', true);
         const panel = CONFIG.reactionRoles.panels[panelKey];
+
         if (!panel) {
           await interaction.reply(makeEphemeral('❌ Panel not found.'));
           return;
@@ -631,7 +655,7 @@ client.on('interactionCreate', async (interaction) => {
         const embed = new EmbedBuilder()
           .setColor(panel.color)
           .setTitle(panel.title)
-          .setDescription(panel.description);
+          .setDescription(buildReactionPanelDescription(interaction.guild, panel));
 
         const sent = await interaction.channel.send({ embeds: [embed] });
 
@@ -662,13 +686,13 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      // adduser
       if (interaction.commandName === 'adduser') {
         const ticket = getTicketByChannelId(interaction.channel.id);
         if (!ticket) {
           await interaction.reply(makeEphemeral('❌ This is not a ticket channel.'));
           return;
         }
+
         if (!interaction.member.roles.cache.has(ticket.staffRoleId)) {
           await interaction.reply(makeEphemeral('❌ Staff only.'));
           return;
@@ -685,13 +709,13 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      // removeuser
       if (interaction.commandName === 'removeuser') {
         const ticket = getTicketByChannelId(interaction.channel.id);
         if (!ticket) {
           await interaction.reply(makeEphemeral('❌ This is not a ticket channel.'));
           return;
         }
+
         if (!interaction.member.roles.cache.has(ticket.staffRoleId)) {
           await interaction.reply(makeEphemeral('❌ Staff only.'));
           return;
@@ -703,13 +727,13 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      // rename ticket
       if (interaction.commandName === 'renameticket') {
         const ticket = getTicketByChannelId(interaction.channel.id);
         if (!ticket) {
           await interaction.reply(makeEphemeral('❌ This is not a ticket channel.'));
           return;
         }
+
         if (!interaction.member.roles.cache.has(ticket.staffRoleId)) {
           await interaction.reply(makeEphemeral('❌ Staff only.'));
           return;
@@ -723,11 +747,22 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     if (interaction.isButton()) {
-      // verify
       if (interaction.customId === 'verify_member') {
         const role = interaction.guild.roles.cache.get(CONFIG.verify.memberRoleId);
+
         if (!role) {
-          await interaction.reply(makeEphemeral('❌ Member role not found.'));
+          await interaction.reply(makeEphemeral('❌ Verify role not found. Check memberRoleId in index.js.'));
+          return;
+        }
+
+        const me = interaction.guild.members.me;
+        if (!me.permissions.has(PermissionsBitField.Flags.ManageRoles)) {
+          await interaction.reply(makeEphemeral('❌ Bot is missing Manage Roles permission.'));
+          return;
+        }
+
+        if (me.roles.highest.position <= role.position) {
+          await interaction.reply(makeEphemeral('❌ Bot role must be above the verify role in the role list.'));
           return;
         }
 
@@ -736,12 +771,17 @@ client.on('interactionCreate', async (interaction) => {
           return;
         }
 
-        await interaction.member.roles.add(role).catch(() => null);
-        await interaction.reply(makeEphemeral('✅ You have been verified and received the member role.'));
+        try {
+          await interaction.member.roles.add(role);
+          await interaction.reply(makeEphemeral('✅ You have been verified and received the member role.'));
+        } catch (error) {
+          console.error('Verify error:', error);
+          await interaction.reply(makeEphemeral('❌ Failed to give verify role. Check role hierarchy and permissions.'));
+        }
+
         return;
       }
 
-      // open tickets
       if (interaction.customId.startsWith('ticket_open_')) {
         const key = interaction.customId.replace('ticket_open_', '');
         const info = CONFIG.tickets.categories[key];
@@ -756,7 +796,9 @@ client.on('interactionCreate', async (interaction) => {
         );
 
         if (existing) {
-          await interaction.reply(makeEphemeral(`❌ You already have an open ${info.label} ticket: <#${existing.channelId}>`));
+          await interaction.reply(
+            makeEphemeral(`❌ You already have an open ${info.label} ticket: <#${existing.channelId}>`)
+          );
           return;
         }
 
@@ -830,9 +872,9 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      // claim / close
       if (interaction.customId === 'ticket_claim' || interaction.customId === 'ticket_close') {
         const ticket = getTicketByChannelId(interaction.channel.id);
+
         if (!ticket) {
           await interaction.reply(makeEphemeral('❌ This is not a ticket channel.'));
           return;
@@ -886,12 +928,14 @@ client.on('interactionCreate', async (interaction) => {
           setTimeout(async () => {
             await interaction.channel.delete().catch(() => null);
           }, 3000);
+
           return;
         }
       }
     }
   } catch (err) {
     console.error('interactionCreate error:', err);
+
     try {
       if (interaction.deferred || interaction.replied) {
         await interaction.followUp(makeEphemeral('❌ Something went wrong.')).catch(() => null);
@@ -910,7 +954,6 @@ client.on('messageCreate', async (message) => {
     if (message.author.bot) return;
     if (!message.guild) return;
 
-    // counting only
     if (message.channel.id === CONFIG.counting.channelId) {
       const content = message.content.trim();
 
@@ -1009,6 +1052,7 @@ async function handleReactionRole(reaction, user, add) {
     } else {
       await member.roles.remove(role).catch(() => null);
     }
+
     return;
   }
 }
