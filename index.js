@@ -735,25 +735,27 @@ function httpsGetJson(url, headers = {}) {
 }
 
 async function fetchMinecraftServerStatus(address) {
+  const start = Date.now();
+
   try {
     const apiUrl = `https://api.mcsrvstat.us/3/${encodeURIComponent(address)}`;
     const data = await httpsGetJson(apiUrl);
+    const latency = Date.now() - start;
 
     return {
       online: Boolean(data.online),
       playersOnline: data?.players?.online ?? 0,
       playersMax: data?.players?.max ?? 0,
-      version:
-        data?.protocol?.name ||
-        data?.version ||
-        'Unknown',
+      version: data?.protocol?.name || data?.version || 'Unknown',
       motd:
         Array.isArray(data?.motd?.clean) && data.motd.clean.length
           ? data.motd.clean.join('\n')
           : 'No MOTD available',
       hostname: data?.hostname || address,
       ip: data?.ip || 'Unknown',
-      port: data?.port || 25565
+      port: data?.port || 25565,
+      icon: data?.icon || null,
+      latency
     };
   } catch (error) {
     console.error('❌ Failed to fetch Minecraft server status:', error);
@@ -766,39 +768,57 @@ async function fetchMinecraftServerStatus(address) {
       motd: 'Server offline or API unavailable',
       hostname: address,
       ip: 'Unknown',
-      port: 25565
+      port: 25565,
+      icon: null,
+      latency: 0
     };
   }
 }
 
 function buildMinecraftStatusEmbed(status) {
-  return new EmbedBuilder()
+  const embed = new EmbedBuilder()
     .setColor(status.online ? 0x2ecc71 : 0xe74c3c)
     .setTitle(CONFIG.minecraftStatus.title)
+    .setDescription(
+      status.online
+        ? `🟢 **Server is online**\n${status.motd}`
+        : `🔴 **Server is offline**\n${status.motd}`
+    )
     .addFields(
       {
-        name: 'Status',
-        value: status.online ? '🟢 Online' : '🔴 Offline',
-        inline: true
-      },
-      {
-        name: 'Players',
+        name: '👥 Players',
         value: `${status.playersOnline}/${status.playersMax}`,
         inline: true
       },
       {
-        name: 'Version',
+        name: '📶 Latency',
+        value: status.online ? `${status.latency}ms` : 'N/A',
+        inline: true
+      },
+      {
+        name: '🧩 Version',
         value: status.version,
         inline: true
       },
       {
-        name: 'Server',
+        name: '🌐 Server IP',
         value: CONFIG.minecraftStatus.address,
+        inline: false
+      },
+      {
+        name: '🕒 Last Update',
+        value: `<t:${Math.floor(Date.now() / 1000)}:R>`,
         inline: false
       }
     )
-    .setDescription(status.motd)
+    .setFooter({ text: 'Abiu & Co Server Status' })
     .setTimestamp();
+
+  if (status.icon && typeof status.icon === 'string' && status.icon.startsWith('data:image')) {
+    embed.setThumbnail('attachment://server-icon.png');
+  }
+
+  return embed;
 }
 
 async function getOrCreateMinecraftStatusMessage() {
@@ -824,7 +844,19 @@ async function getOrCreateMinecraftStatusMessage() {
 
   const initialStatus = await fetchMinecraftServerStatus(CONFIG.minecraftStatus.address);
   const embed = buildMinecraftStatusEmbed(initialStatus);
-  const sent = await channel.send({ embeds: [embed] }).catch(() => null);
+
+  let files = [];
+  if (initialStatus.icon && initialStatus.icon.startsWith('data:image')) {
+    const base64Data = initialStatus.icon.split(',')[1];
+    const buffer = Buffer.from(base64Data, 'base64');
+    files.push({ attachment: buffer, name: 'server-icon.png' });
+  }
+
+  const sent = await channel.send({
+    embeds: [embed],
+    files
+  }).catch(() => null);
+
   return sent || null;
 }
 
@@ -835,7 +867,17 @@ async function updateMinecraftStatusEmbed() {
   const status = await fetchMinecraftServerStatus(CONFIG.minecraftStatus.address);
   const embed = buildMinecraftStatusEmbed(status);
 
-  await message.edit({ embeds: [embed] }).catch((error) => {
+  let files = [];
+  if (status.icon && status.icon.startsWith('data:image')) {
+    const base64Data = status.icon.split(',')[1];
+    const buffer = Buffer.from(base64Data, 'base64');
+    files.push({ attachment: buffer, name: 'server-icon.png' });
+  }
+
+  await message.edit({
+    embeds: [embed],
+    files
+  }).catch((error) => {
     console.error('❌ Failed to update Minecraft status embed:', error);
   });
 }
@@ -846,7 +888,7 @@ async function updateMinecraftStatusEmbed() {
 client.once('ready', async () => {
   console.log(`✅ ${client.user.tag} is online`);
 
-    await updateMinecraftStatusEmbed();
+  await updateMinecraftStatusEmbed();
 
   setInterval(async () => {
     await updateMinecraftStatusEmbed();
