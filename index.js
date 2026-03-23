@@ -1,5 +1,4 @@
-require('dotenv').config({ path: './config.env' });
-require('dotenv').config({ path: './secret.env' });
+require('dotenv').config({ path: '.env' });
 
 const fs = require('fs');
 const path = require('path');
