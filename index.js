@@ -40,6 +40,10 @@ if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
 const CONFIG = {
   guildId: GUILD_ID,
 
+  moderation: {
+    logChannelId: null // zet hier een log channel ID als je wilt, anders null laten
+  },
+
   verify: {
     memberRoleId: '1462534294378512496',
     verifyInfoChannelId: '1462537911013478655',
@@ -381,36 +385,36 @@ async function ensurePlayer(interactionOrMember, state) {
     state.player.on('stuck', (data) => {
       console.error('❌ Music player stuck:', data);
     });
-} else {
-  const currentChannelId = state.player.channelId || state.player.voiceChannelId;
+  } else {
+    const currentChannelId = state.player.channelId || state.player.voiceChannelId;
 
-  if (currentChannelId !== voiceChannel.id) {
-    await shoukaku.leaveVoiceChannel(guild.id).catch(() => null);
+    if (currentChannelId !== voiceChannel.id) {
+      await shoukaku.leaveVoiceChannel(guild.id).catch(() => null);
 
-    state.player = await shoukaku.joinVoiceChannel({
-      guildId: guild.id,
-      channelId: voiceChannel.id,
-      shardId: 0,
-      deaf: true
-    });
+      state.player = await shoukaku.joinVoiceChannel({
+        guildId: guild.id,
+        channelId: voiceChannel.id,
+        shardId: 0,
+        deaf: true
+      });
 
-    state.player.on('end', async () => {
-      await playNext(guild.id).catch(console.error);
-    });
+      state.player.on('end', async () => {
+        await playNext(guild.id).catch(console.error);
+      });
 
-    state.player.on('closed', (data) => {
-      console.log('⚠️ Music player closed:', data);
-    });
+      state.player.on('closed', (data) => {
+        console.log('⚠️ Music player closed:', data);
+      });
 
-    state.player.on('exception', (data) => {
-      console.error('❌ Music player exception:', data);
-    });
+      state.player.on('exception', (data) => {
+        console.error('❌ Music player exception:', data);
+      });
 
-    state.player.on('stuck', (data) => {
-      console.error('❌ Music player stuck:', data);
-    });
+      state.player.on('stuck', (data) => {
+        console.error('❌ Music player stuck:', data);
+      });
+    }
   }
-}
 
   return state.player;
 }
@@ -422,11 +426,12 @@ async function playTrack(guildId, track) {
   state.current = track;
   state.paused = false;
 
-await state.player.playTrack({
-  track: {
-    encoded: track.encoded
-  }
-});
+  await state.player.playTrack({
+    track: {
+      encoded: track.encoded
+    }
+  });
+
   await state.player.setGlobalVolume(state.volume).catch(() => null);
 
   if (state.textChannelId) {
@@ -469,7 +474,7 @@ async function stopAndDisconnect(guildId) {
 
   if (state.player) {
     await state.player.stopTrack().catch(() => null);
-await shoukaku.leaveVoiceChannel(guildId).catch(() => null);
+    await shoukaku.leaveVoiceChannel(guildId).catch(() => null);
     state.player = null;
   }
 
@@ -593,6 +598,43 @@ function buildTicketControls(ticket) {
       .setLabel('Close Ticket')
       .setStyle(ButtonStyle.Danger)
   );
+}
+
+function buildBanSuccessEmbed(targetUser, reason, moderatorUser) {
+  return new EmbedBuilder()
+    .setColor(0xe74c3c)
+    .setTitle('User Banned')
+    .setDescription(`I have banned ${targetUser} from this server.`)
+    .addFields(
+      { name: 'User', value: `${targetUser.tag} (${targetUser.id})`, inline: false },
+      { name: 'Reason', value: reason, inline: false },
+      { name: 'Executed by', value: `${client.user.tag}`, inline: true },
+      { name: 'Requested by', value: `${moderatorUser.tag}`, inline: true }
+    )
+    .setFooter({ text: 'Moderation action executed by the bot' })
+    .setTimestamp();
+}
+
+function buildBanLogEmbed(targetUser, reason, moderatorUser) {
+  return new EmbedBuilder()
+    .setColor(0xe67e22)
+    .setTitle('Ban Logged')
+    .addFields(
+      { name: 'Banned User', value: `${targetUser.tag} (${targetUser.id})`, inline: false },
+      { name: 'Reason', value: reason, inline: false },
+      { name: 'Requested by', value: `${moderatorUser.tag} (${moderatorUser.id})`, inline: false },
+      { name: 'Executed by', value: `${client.user.tag}`, inline: false }
+    )
+    .setTimestamp();
+}
+
+async function sendBanLog(guild, embed) {
+  if (!CONFIG.moderation.logChannelId) return;
+
+  const channel = await guild.channels.fetch(CONFIG.moderation.logChannelId).catch(() => null);
+  if (!channel || channel.type !== ChannelType.GuildText) return;
+
+  await channel.send({ embeds: [embed] }).catch(() => null);
 }
 
 async function createTranscript(channel) {
@@ -900,6 +942,29 @@ client.once('ready', async () => {
     new SlashCommandBuilder().setName('ping').setDescription('Replies with pong'),
 
     new SlashCommandBuilder()
+      .setName('ban')
+      .setDescription('Ban a user from the server')
+      .setDefaultMemberPermissions(PermissionFlagsBits.BanMembers)
+      .addUserOption((opt) =>
+        opt.setName('user').setDescription('The user to ban').setRequired(true)
+      )
+      .addStringOption((opt) =>
+        opt.setName('reason').setDescription('Reason for the ban').setRequired(true)
+      )
+      .addBooleanOption((opt) =>
+        opt
+          .setName('delete_messages')
+          .setDescription('Delete the user’s last 24h of messages')
+          .setRequired(false)
+      )
+      .addBooleanOption((opt) =>
+        opt
+          .setName('dm_user')
+          .setDescription('Send the user a DM before the ban')
+          .setRequired(false)
+      ),
+
+    new SlashCommandBuilder()
       .setName('rmc')
       .setDescription('Remove messages')
       .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
@@ -1042,18 +1107,103 @@ client.on('guildMemberAdd', async (member) => {
 client.on('interactionCreate', async (interaction) => {
   const disabledMusic = ['play', 'skip', 'stop', 'queue', 'pause', 'resume'];
 
-if (interaction.isChatInputCommand() && disabledMusic.includes(interaction.commandName)) {
-  return interaction.reply({
-    content: '❌ Music systeem is tijdelijk uitgeschakeld.',
-    ephemeral: true
-  });
-}
+  if (interaction.isChatInputCommand() && disabledMusic.includes(interaction.commandName)) {
+    return interaction.reply({
+      content: '❌ Music systeem is tijdelijk uitgeschakeld.',
+      ephemeral: true
+    });
+  }
+
   try {
     if (interaction.isChatInputCommand()) {
       if (!interaction.guild || !interaction.member) return;
 
       if (interaction.commandName === 'ping') {
         await interaction.reply('pong');
+        return;
+      }
+
+      if (interaction.commandName === 'ban') {
+        const targetUser = interaction.options.getUser('user', true);
+        const reason = interaction.options.getString('reason', true).trim();
+        const deleteMessages = interaction.options.getBoolean('delete_messages') ?? false;
+        const dmUser = interaction.options.getBoolean('dm_user') ?? true;
+
+        if (!interaction.member.permissions.has(PermissionsBitField.Flags.BanMembers)) {
+          await interaction.reply(makeEphemeral('❌ You do not have permission to ban members.'));
+          return;
+        }
+
+        if (!interaction.guild.members.me.permissions.has(PermissionsBitField.Flags.BanMembers)) {
+          await interaction.reply(makeEphemeral('❌ I do not have permission to ban members.'));
+          return;
+        }
+
+        if (targetUser.id === interaction.user.id) {
+          await interaction.reply(makeEphemeral('❌ You cannot ban yourself.'));
+          return;
+        }
+
+        if (targetUser.id === client.user.id) {
+          await interaction.reply(makeEphemeral('❌ I cannot ban myself.'));
+          return;
+        }
+
+        if (targetUser.id === interaction.guild.ownerId) {
+          await interaction.reply(makeEphemeral('❌ I cannot ban the server owner.'));
+          return;
+        }
+
+        const targetMember = await interaction.guild.members.fetch(targetUser.id).catch(() => null);
+
+        if (targetMember) {
+          if (!targetMember.bannable) {
+            await interaction.reply(
+              makeEphemeral('❌ I cannot ban this user. Their role may be higher than mine.')
+            );
+            return;
+          }
+
+          if (
+            interaction.member.roles.highest.position <= targetMember.roles.highest.position &&
+            interaction.guild.ownerId !== interaction.user.id
+          ) {
+            await interaction.reply(
+              makeEphemeral('❌ You cannot ban a user with an equal or higher role than yours.')
+            );
+            return;
+          }
+        }
+
+        await interaction.deferReply();
+
+        if (dmUser) {
+          const dmEmbed = new EmbedBuilder()
+            .setColor(0xe74c3c)
+            .setTitle(`You were banned from ${interaction.guild.name}`)
+            .addFields(
+              { name: 'Reason', value: reason, inline: false },
+              { name: 'Executed by', value: `${client.user.tag}`, inline: true }
+            )
+            .setTimestamp();
+
+          await targetUser.send({ embeds: [dmEmbed] }).catch(() => null);
+        }
+
+        const deleteMessageSeconds = deleteMessages ? 60 * 60 * 24 : 0;
+        const auditReason = `${reason} | Requested by ${interaction.user.tag} (${interaction.user.id}) | Executed by ${client.user.tag}`;
+
+        await interaction.guild.members.ban(targetUser.id, {
+          deleteMessageSeconds,
+          reason: auditReason
+        });
+
+        const publicEmbed = buildBanSuccessEmbed(targetUser, reason, interaction.user);
+        await interaction.editReply({ embeds: [publicEmbed] });
+
+        const logEmbed = buildBanLogEmbed(targetUser, reason, interaction.user);
+        await sendBanLog(interaction.guild, logEmbed);
+
         return;
       }
 
